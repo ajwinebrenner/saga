@@ -6,13 +6,16 @@ import (
 	"iter"
 	"maps"
 	"slices"
+
+	"github.com/ajwinebrenner/saga/internal/errs"
+	"github.com/ajwinebrenner/saga/internal/system"
 )
 
 type World struct {
-	root    *group
-	state   *State
+	root    *skein
+	systems *system.Collection
 	prompt  prompt
-	options map[string]ValidOption
+	threads map[string]ActiveThread
 }
 
 type prompt struct {
@@ -20,32 +23,32 @@ type prompt struct {
 	skip []bool
 }
 
-type ValidOption struct {
+type ActiveThread struct {
 	Name  string
 	Desc  string
 	Depth uint
 }
 
-type group struct {
-	current   Id
-	entrance  entrance
-	scenes    map[Id]scene
-	subGroups map[Id]*group
+type skein struct {
+	current  Id
+	entrance entrance
+	scenes   map[Id]scene
+	skeins   map[Id]*skein
 }
 
 type scene struct {
-	desc    StateFunc[string]
-	options []option
+	desc    DynVal[string]
+	threads []thread
 }
 
-type option struct {
+type thread struct {
 	name      string
-	condition StateFunc[bool]
-	desc      StateFunc[string]
+	condition DynVal[bool]
+	desc      DynVal[string]
 	outcomer  outcomer
 }
 
-// Iterator over desc strings from each level of the scene tree in descending order.
+// Iterator over scene desc strings from each level of the world in descending order.
 // Descriptions are evaluated on update to world state, therefore this function has no side effects.
 // Empty or previously seen descriptions are omitted from the returned values.
 func (w *World) Prompt() iter.Seq[string] {
@@ -58,29 +61,29 @@ func (w *World) Prompt() iter.Seq[string] {
 	}
 }
 
-// ValidOptions returns a list of validOption according to current world state.
-// Options are sorted by depth, allowing handling of options from different levels.
-// Repeated calls ValidOptions do not produce side effects from any StateFunc calls.
-// If conflicting option names occur, only the deepest of the options is considered.
-func (w *World) ValidOptions() []ValidOption {
-	opts := slices.Collect(maps.Values(w.options))
+// Threads returns a list of ActiveThread according to current world state.
+// Threads are sorted by depth, allowing handling of threads from different levels.
+// Repeated calls Threads do not produce side effects from any DynVal calls.
+// If conflicting thread names occur, only the deepest thread is considered.
+func (w *World) Threads() []ActiveThread {
+	threads := slices.Collect(maps.Values(w.threads))
 
-	slices.SortFunc(opts, func(a ValidOption, b ValidOption) int {
+	slices.SortFunc(threads, func(a ActiveThread, b ActiveThread) int {
 		if depthDiff := int(a.Depth - b.Depth); depthDiff != 0 {
 			return depthDiff
 		}
 		return cmp.Compare(a.Name, b.Name)
 	})
 
-	return opts
+	return threads
 }
 
-// If option is valid, the option will be used to find the next scene and associated event.
-// World state is updated to reflect the outcome of the choosing this option.
+// If thread is active, the thread will be used to find the next scene and associated event.
+// World state is updated to reflect the outcome of the choosing this thread.
 // The returned string describes the outcome, but can be empty.
-// If option is invalid, an InvalidOptionErr will be returned.
-func (w *World) Choose(option string) (string, error) {
-	desc, err := w.tryOption(option)
+// If thread is inactive, a ThreadNotFoundError will be returned.
+func (w *World) Choose(thread string) (string, error) {
+	desc, err := w.followThread(thread)
 	if err != nil {
 		return "", err
 	}
@@ -89,27 +92,27 @@ func (w *World) Choose(option string) (string, error) {
 	return desc, nil
 }
 
-// Collects all valid options and desciptions for current world state.
-// This should be called once between updates to world state as StateFuncs may have side effects.
+// Collects all active threads and descriptions for current world state.
+// This should be called once between updates to world state as dynamic values may have side effects.
 func (w *World) collect() {
-	clear(w.options)
+	clear(w.threads)
 
 	currentDepth := uint(0)
-	currentGroup := w.root
-	for currentGroup != nil {
-		currentScene := currentGroup.scenes[currentGroup.current]
+	currentSkein := w.root
+	for currentSkein != nil {
+		currentScene := currentSkein.scenes[currentSkein.current]
 
-		for _, opt := range currentScene.options {
-			if opt.condition == nil || opt.condition(w.state) {
-				w.options[opt.name] = ValidOption{
-					Name:  opt.name,
-					Desc:  safeStateFunc(opt.desc, w.state),
+		for _, thread := range currentScene.threads {
+			if thread.condition == nil || thread.condition.Eval(w.systems) {
+				w.threads[thread.name] = ActiveThread{
+					Name:  thread.name,
+					Desc:  safeEval(thread.desc, w.systems),
 					Depth: currentDepth,
 				}
 			}
 		}
 
-		desc := safeStateFunc(currentScene.desc, w.state)
+		desc := safeEval(currentScene.desc, w.systems)
 		if len(w.prompt.desc) > int(currentDepth) {
 			w.prompt.skip[currentDepth] = desc == "" || desc == w.prompt.desc[currentDepth]
 			w.prompt.desc[currentDepth] = desc
@@ -119,60 +122,60 @@ func (w *World) collect() {
 		}
 
 		currentDepth++
-		currentGroup = currentGroup.subGroups[currentGroup.current]
+		currentSkein = currentSkein.skeins[currentSkein.current]
 	}
 
 	w.prompt.skip = w.prompt.skip[:currentDepth]
 	w.prompt.desc = w.prompt.desc[:currentDepth]
 }
 
-const errCorruptWorldState = stringError("internal world state corruption")
+const errCorruptWorldState = errs.Static("internal world state corruption")
 
-type InvalidOptionError struct {
+type ThreadNotFoundError struct {
 	name string
 }
 
-func (e InvalidOptionError) Error() string {
-	return fmt.Sprintf("option %q not valid", e.name)
+func (e ThreadNotFoundError) Error() string {
+	return fmt.Sprintf("thread %q not found", e.name)
 }
 
-// Takes unsanitised input and applies the valid option if found.
-// If valid, a description of the outcome is returned.
-func (w *World) tryOption(name string) (string, error) {
-	choice, ok := w.options[name]
+// Takes unsanitised input and traverses the active thread if found.
+// If active, a description of the outcome is returned.
+func (w *World) followThread(name string) (string, error) {
+	choice, ok := w.threads[name]
 	if !ok {
-		return "", InvalidOptionError{name: name}
+		return "", ThreadNotFoundError{name: name}
 	}
 
-	group := w.root
-	for d := uint(0); d < choice.Depth && group != nil; d++ {
-		group = group.subGroups[group.current]
+	skein := w.root
+	for d := uint(0); d < choice.Depth && skein != nil; d++ {
+		skein = skein.skeins[skein.current]
 	}
 
 	// should only happen if internal state is incorrectly altered after collect
-	if group == nil {
+	if skein == nil {
 		return "", errCorruptWorldState
 	}
-	opts := group.scenes[group.current].options
-	optIdx := slices.IndexFunc(opts, func(o option) bool { return o.name == name })
-	if optIdx < 0 {
+	threads := skein.scenes[skein.current].threads
+	threadIdx := slices.IndexFunc(threads, func(t thread) bool { return t.name == name })
+	if threadIdx < 0 {
 		return "", errCorruptWorldState
 	}
 
-	previousId := group.current
+	previousId := skein.current
 
-	outcome := opts[optIdx].outcomer.outcome(w.state)
-	group.current = outcome.next
+	outcome := threads[threadIdx].outcomer.outcome(w.systems)
+	skein.current = outcome.next
 
-	group = group.subGroups[group.current]
-	for group != nil {
-		entryId := group.entrance.calc(previousId)
+	skein = skein.skeins[skein.current]
+	for skein != nil {
+		entryId := skein.entrance.calc(previousId)
 		if entryId == "" {
 			break
 		}
 
-		group.current = entryId
-		group = group.subGroups[group.current]
+		skein.current = entryId
+		skein = skein.skeins[skein.current]
 	}
 
 	return outcome.desc, nil
@@ -184,7 +187,7 @@ type entrance struct {
 	alts     map[Id]Id
 }
 
-// `from` is the scene ID before choosing the most recent option.
+// `from` is the scene ID before choosing the most recent thread.
 // Empty string indicates no further scenes should be changed.
 func (e entrance) calc(from Id) Id {
 	if e.alts != nil {
@@ -202,7 +205,7 @@ func (e entrance) calc(from Id) Id {
 
 type outcomer struct {
 	next      Id
-	event     StateFunc[string]
+	event     DynVal[string]
 	overrides []Override
 }
 
@@ -211,18 +214,26 @@ type outcome struct {
 	desc string
 }
 
-func (o outcomer) outcome(state *State) outcome {
+func (o outcomer) outcome(state *system.Collection) outcome {
 	for _, override := range o.overrides {
-		if safeStateFunc(override.Condition, state) {
+		if safeEval(override.Condition, state) {
 			return outcome{
 				next: override.Next,
-				desc: safeStateFunc(override.Event, state),
+				desc: safeEval(override.Event, state),
 			}
 		}
 	}
 
 	return outcome{
 		next: o.next,
-		desc: safeStateFunc(o.event, state),
+		desc: safeEval(o.event, state),
 	}
+}
+
+func safeEval[T any](v DynVal[T], coll *system.Collection) T {
+	if v == nil {
+		var empty T
+		return empty
+	}
+	return v.Eval(coll)
 }

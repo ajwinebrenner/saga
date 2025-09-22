@@ -9,15 +9,19 @@ import (
 )
 
 func TestWorld(t *testing.T) {
-	root := testGroup()
-	state := testState()
-	world, err := Build(&root, state)
+	root := testSkein()
+	sys := testSystem{
+		toggle: false,
+		count:  0,
+	}
+
+	world, err := Weave(&root, []any{&sys})
 	require.NoError(t, err)
 
 	type exp struct {
-		event  string
-		prompt []string
-		opts   []ValidOption
+		event   string
+		prompt  []string
+		threads []ActiveThread
 	}
 
 	for _, step := range []struct {
@@ -30,7 +34,7 @@ func TestWorld(t *testing.T) {
 			expected: exp{
 				event:  "going to b",
 				prompt: nil,
-				opts: []ValidOption{{
+				threads: []ActiveThread{{
 					Name:  "toa",
 					Desc:  "",
 					Depth: 0,
@@ -42,7 +46,7 @@ func TestWorld(t *testing.T) {
 			expected: exp{
 				event:  "",
 				prompt: []string{"start"},
-				opts: []ValidOption{
+				threads: []ActiveThread{
 					{
 						Name:  "tob",
 						Desc:  "go to b",
@@ -59,8 +63,8 @@ func TestWorld(t *testing.T) {
 			next: "toc",
 			expected: exp{
 				event:  "",
-				prompt: []string{"count: 0", "subscene"},
-				opts: []ValidOption{
+				prompt: []string{"count: 0", "sub-scene"},
+				threads: []ActiveThread{
 					{
 						Name:  "to2",
 						Desc:  "go to 2",
@@ -74,7 +78,7 @@ func TestWorld(t *testing.T) {
 			expected: exp{
 				event:  "going to 2",
 				prompt: nil,
-				opts: []ValidOption{
+				threads: []ActiveThread{
 					{
 						Name:  "long3",
 						Depth: 1,
@@ -93,12 +97,12 @@ func TestWorld(t *testing.T) {
 		{
 			next: "wait",
 			preFunc: func() {
-				System[testSystem](state).count++
+				sys.count++
 			},
 			expected: exp{
 				event:  "",
 				prompt: []string{"count: 1"},
-				opts: []ValidOption{
+				threads: []ActiveThread{
 					{
 						Name:  "long3",
 						Depth: 1,
@@ -117,12 +121,12 @@ func TestWorld(t *testing.T) {
 		{
 			next: "long3",
 			preFunc: func() {
-				System[testSystem](state).count++
+				sys.count++
 			},
 			expected: exp{
 				event:  "taking the long way to 3",
 				prompt: []string{"count: 2", "you are at 3"},
-				opts: []ValidOption{
+				threads: []ActiveThread{
 					{
 						Name:  "to1",
 						Depth: 1,
@@ -134,8 +138,8 @@ func TestWorld(t *testing.T) {
 			next: "to1",
 			expected: exp{
 				event:  "",
-				prompt: []string{"subscene"},
-				opts: []ValidOption{
+				prompt: []string{"sub-scene"},
+				threads: []ActiveThread{
 					{
 						Name:  "to2",
 						Desc:  "go to 2",
@@ -147,12 +151,12 @@ func TestWorld(t *testing.T) {
 		{
 			next: "to2",
 			preFunc: func() {
-				System[testSystem](state).toggle = true
+				sys.toggle = true
 			},
 			expected: exp{
 				event:  "failed to go to 2",
 				prompt: nil,
-				opts: []ValidOption{
+				threads: []ActiveThread{
 					{
 						Name:  "toa",
 						Depth: 0,
@@ -170,7 +174,7 @@ func TestWorld(t *testing.T) {
 			expected: exp{
 				event:  "",
 				prompt: []string{"start"},
-				opts: []ValidOption{
+				threads: []ActiveThread{
 					{
 						Name:  "tob",
 						Desc:  "go to b",
@@ -188,7 +192,7 @@ func TestWorld(t *testing.T) {
 			expected: exp{
 				event:  "going to b",
 				prompt: nil,
-				opts: []ValidOption{
+				threads: []ActiveThread{
 					{
 						Name:  "toa",
 						Depth: 0,
@@ -201,7 +205,7 @@ func TestWorld(t *testing.T) {
 			expected: exp{
 				event:  "going to c instead",
 				prompt: []string{"count: 2"},
-				opts: []ValidOption{
+				threads: []ActiveThread{
 					{
 						Name:  "toa",
 						Depth: 0,
@@ -230,6 +234,6 @@ func TestWorld(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, step.expected.event, event)
 		assert.Equal(t, step.expected.prompt, slices.Collect(world.Prompt()))
-		assert.Equal(t, step.expected.opts, world.ValidOptions())
+		assert.Equal(t, step.expected.threads, world.Threads())
 	}
 }

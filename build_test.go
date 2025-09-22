@@ -5,18 +5,19 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/ajwinebrenner/saga/internal/system"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 )
 
-func testGroup() Group {
-	return Group{
+func testSkein() Skein {
+	return Skein{
 		EntryScene: "a",
 		Scenes: []Scene{
 			{
 				Id:   "a",
 				Desc: Just("start"),
-				Options: []Option{
+				Threads: []Thread{
 					{
 						Name:  "tob",
 						Next:  "b",
@@ -37,7 +38,7 @@ func testGroup() Group {
 			},
 			{
 				Id: "b",
-				Options: []Option{
+				Threads: []Thread{
 					{
 						Name: "toa",
 						Next: "a",
@@ -45,28 +46,29 @@ func testGroup() Group {
 							{
 								Next:  "c",
 								Event: Just("going to c instead"),
-								Condition: func(state *State) bool {
-									return System[testSystem](state).toggle
-								}},
+								Condition: Dyn(func(s *testSystem) bool {
+									return s.toggle
+								}),
+							},
 						},
 					},
 				},
 			},
 			{
 				Id: "c",
-				Desc: func(state *State) string {
-					return fmt.Sprintf("count: %d", System[testSystem](state).count)
-				},
-				Options: []Option{
+				Desc: Dyn(func(sys *testSystem) string {
+					return fmt.Sprintf("count: %d", sys.count)
+				}),
+				Threads: []Thread{
 					{
 						Name: "toa",
 						Next: "a",
-						Condition: func(state *State) bool {
-							return System[testSystem](state).toggle
-						},
+						Condition: Dyn(func(sys *testSystem) bool {
+							return sys.toggle
+						}),
 					},
 				},
-				Group: &Group{
+				Skein: &Skein{
 					EntryScene: "1",
 					Persist:    true,
 					AltEntries: []AltEntry{
@@ -75,8 +77,8 @@ func testGroup() Group {
 					Scenes: []Scene{
 						{
 							Id:   "1",
-							Desc: Just("subscene"),
-							Options: []Option{
+							Desc: Just("sub-scene"),
+							Threads: []Thread{
 								{
 									Name:      "to2",
 									Next:      "2",
@@ -87,9 +89,9 @@ func testGroup() Group {
 										{
 											Next:  "1",
 											Event: Just("failed to go to 2"),
-											Condition: func(state *State) bool {
-												return System[testSystem](state).toggle
-											},
+											Condition: Dyn(func(sys *testSystem) bool {
+												return sys.toggle
+											}),
 										},
 									},
 								},
@@ -97,7 +99,7 @@ func testGroup() Group {
 						},
 						{
 							Id: "2",
-							Options: []Option{
+							Threads: []Thread{
 								{
 									Name: "to3",
 									Next: "3",
@@ -116,7 +118,7 @@ func testGroup() Group {
 						{
 							Id:   "3",
 							Desc: Just("you are at 3"),
-							Options: []Option{
+							Threads: []Thread{
 								{
 									Name: "to1",
 									Next: "1",
@@ -135,21 +137,13 @@ type testSystem struct {
 	count  int
 }
 
-func testState() *State {
-	state := NewState()
-	state.AddSystem(&testSystem{
-		toggle: false,
-		count:  0,
-	})
-	return state
-}
-
 func TestBuildPassing(t *testing.T) {
-	root := testGroup()
-	state := testState()
+	root := testSkein()
 
+	expectedColl := system.NewCollection()
+	expectedColl.Add(&testSystem{})
 	expected := &World{
-		root: &group{
+		root: &skein{
 			current: "a",
 			entrance: entrance{
 				standard: "a",
@@ -159,14 +153,14 @@ func TestBuildPassing(t *testing.T) {
 			scenes: map[Id]scene{
 				"a": {
 					desc: root.Scenes[0].Desc,
-					options: []option{
+					threads: []thread{
 						{
 							name:      "tob",
 							condition: nil,
-							desc:      root.Scenes[0].Options[0].Desc,
+							desc:      root.Scenes[0].Threads[0].Desc,
 							outcomer: outcomer{
 								next:      "b",
-								event:     root.Scenes[0].Options[0].Event,
+								event:     root.Scenes[0].Threads[0].Event,
 								overrides: nil,
 							},
 						},
@@ -184,7 +178,7 @@ func TestBuildPassing(t *testing.T) {
 				},
 				"b": {
 					desc: nil,
-					options: []option{
+					threads: []thread{
 						{
 							name:      "toa",
 							condition: nil,
@@ -192,17 +186,17 @@ func TestBuildPassing(t *testing.T) {
 							outcomer: outcomer{
 								next:      "a",
 								event:     nil,
-								overrides: root.Scenes[1].Options[0].Overrides,
+								overrides: root.Scenes[1].Threads[0].Overrides,
 							},
 						},
 					},
 				},
 				"c": {
 					desc: root.Scenes[2].Desc,
-					options: []option{
+					threads: []thread{
 						{
 							name:      "toa",
-							condition: root.Scenes[2].Options[0].Condition,
+							condition: root.Scenes[2].Threads[0].Condition,
 							desc:      nil,
 							outcomer: outcomer{
 								next:      "a",
@@ -213,7 +207,7 @@ func TestBuildPassing(t *testing.T) {
 					},
 				},
 			},
-			subGroups: map[Id]*group{
+			skeins: map[Id]*skein{
 				"c": {
 					current: "1",
 					entrance: entrance{
@@ -225,23 +219,23 @@ func TestBuildPassing(t *testing.T) {
 					},
 					scenes: map[Id]scene{
 						"1": {
-							desc: root.Scenes[2].Group.Scenes[0].Desc,
-							options: []option{
+							desc: root.Scenes[2].Skein.Scenes[0].Desc,
+							threads: []thread{
 								{
 									name:      "to2",
-									condition: root.Scenes[2].Group.Scenes[0].Options[0].Condition,
-									desc:      root.Scenes[2].Group.Scenes[0].Options[0].Desc,
+									condition: root.Scenes[2].Skein.Scenes[0].Threads[0].Condition,
+									desc:      root.Scenes[2].Skein.Scenes[0].Threads[0].Desc,
 									outcomer: outcomer{
 										next:      "2",
-										event:     root.Scenes[2].Group.Scenes[0].Options[0].Event,
-										overrides: root.Scenes[2].Group.Scenes[0].Options[0].Overrides,
+										event:     root.Scenes[2].Skein.Scenes[0].Threads[0].Event,
+										overrides: root.Scenes[2].Skein.Scenes[0].Threads[0].Overrides,
 									},
 								},
 							},
 						},
 						"2": {
 							desc: nil,
-							options: []option{
+							threads: []thread{
 								{
 									name:      "to3",
 									condition: nil,
@@ -258,7 +252,7 @@ func TestBuildPassing(t *testing.T) {
 									desc:      nil,
 									outcomer: outcomer{
 										next:      "3",
-										event:     root.Scenes[2].Group.Scenes[1].Options[1].Event,
+										event:     root.Scenes[2].Skein.Scenes[1].Threads[1].Event,
 										overrides: nil,
 									},
 								},
@@ -275,8 +269,8 @@ func TestBuildPassing(t *testing.T) {
 							},
 						},
 						"3": {
-							desc: root.Scenes[2].Group.Scenes[2].Desc,
-							options: []option{
+							desc: root.Scenes[2].Skein.Scenes[2].Desc,
+							threads: []thread{
 								{
 									name:      "to1",
 									condition: nil,
@@ -290,16 +284,16 @@ func TestBuildPassing(t *testing.T) {
 							},
 						},
 					},
-					subGroups: map[Id]*group{},
+					skeins: map[Id]*skein{},
 				},
 			},
 		},
-		state: state,
+		systems: expectedColl,
 		prompt: prompt{
 			desc: []string{"start"},
 			skip: []bool{false},
 		},
-		options: map[string]ValidOption{
+		threads: map[string]ActiveThread{
 			"tob": {
 				Name:  "tob",
 				Desc:  "go to b",
@@ -313,22 +307,25 @@ func TestBuildPassing(t *testing.T) {
 		},
 	}
 
-	actual, err := Build(&root, state)
+	type testBool func(*testSystem) bool
+	type testString func(*testSystem) string
+
+	actual, err := Weave(&root, []any{&testSystem{}})
 	assert.NoError(t, err)
 	diff := cmp.Diff(expected, actual,
 		cmp.Exporter(func(t reflect.Type) bool {
 			return true
 		}),
 		// root needs to compare function addresses
-		cmp.Transformer("sfbool", func(f StateFunc[bool]) string {
+		cmp.Transformer("fbool", func(f testBool) string {
 			return fmt.Sprint(f)
 		}),
-		cmp.Transformer("sfstring", func(f StateFunc[string]) string {
+		cmp.Transformer("fstring", func(f testString) string {
 			return fmt.Sprint(f)
 		}),
 	)
 	if diff != "" {
-		t.Logf("builds are not equal\n%s", diff)
+		t.Logf("worlds are not equivalent\n%s", diff)
 		t.Fail()
 	}
 }

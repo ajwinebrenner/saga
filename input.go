@@ -1,88 +1,66 @@
 package saga
 
+import (
+	"reflect"
+
+	"github.com/ajwinebrenner/saga/internal/dyn"
+	"github.com/ajwinebrenner/saga/internal/system"
+)
+
 type Id string
 
-type StateFunc[T any] func(state *State) T
-
-type Group struct {
+// A collection of scenes with a default starting or entry scene.
+// Scenes may only reference other scenes within the same skein.
+// Persist retains the last scene visited when traversing back to this skein.
+type Skein struct {
 	EntryScene Id
 	Persist    bool
 	AltEntries []AltEntry
 	Scenes     []Scene
 }
 
-// Specifies an alternative initial scene when entering the group.
+// Specifies an alternative initial scene when entering the skein.
 // Only applies when `From` matches the previous scene (parent sibling).
 type AltEntry struct {
 	Scene Id
 	From  Id
 }
 
+// The main component of the world. A Scene can represent a location, or moment of decision.
+// `Id` must be unique within the same skein. The prompt for any given world state is comprised of
+// `Desc` for each current scene, avoiding repetition when the description doesn't change.
 type Scene struct {
 	Id      Id
-	Desc    StateFunc[string]
-	Options []Option
-	Group   *Group // likely to be sparse (nil)
-	// Action  func(*State, string) // struct to combine with hints etc.
-	// Redirects []
+	Desc    DynVal[string]
+	Threads []Thread
+	Skein   *Skein // likely to be sparse (nil)
 }
 
-type Action struct {
-	f func(*State, string) ActionResult
-}
-
-type ActionResult struct {
-	Desc  string
-	Valid bool
-}
-
-type Option struct {
+// A `Thread` primarily enables traversal from one scene to another. `Name` must not be an empty string.
+// Threads that appear last will take precedence when a name is used by more than one thread.
+// `Next` must refer to a scene in the same skein and can refer to the same scene the thread belongs to.
+type Thread struct {
 	Name      string
 	Next      Id
-	Desc      StateFunc[string] // Run once when valid for the current scene, describes choice before choosing
-	Event     StateFunc[string] // Run once when the option is chosen, returns description of outcome
-	Condition StateFunc[bool]   // Determines whether option is valid, if nil, option is always valid
+	Desc      DynVal[string] // Eval once when active for the current scene, describes thread before choosing
+	Event     DynVal[string] // Eval once when the thread is chosen, returns description of outcome
+	Condition DynVal[bool]   // Determines whether thread is active, if nil, thread is always active
 	Overrides []Override
 }
 
-// The first Override where Condition is true will replace Next and Event.
+// The first Override where `Condition` is true will replace `Next` and `Event` on the parent thread.
 type Override struct {
 	Next      Id
-	Event     StateFunc[string]
-	Condition StateFunc[bool]
+	Event     DynVal[string]
+	Condition DynVal[bool]
 }
 
-func MakeScene(id Id, desc StateFunc[string], options []Option, opts ...func(*Scene)) Scene {
-	n := Scene{
-		Id:      id,
-		Desc:    desc,
-		Options: options,
-	}
+type ThreadOption func(*Thread)
 
-	for _, opt := range opts {
-		opt(&n)
-	}
-
-	return n
-}
-
-// Will expand the current scene to contain subscenes.
-// All subScenes will have access to parent options.
-func WithSubScenes(initial Id, retain bool, scenes ...Scene) func(*Scene) {
-	return func(n *Scene) {
-		n.Group = &Group{
-			EntryScene: initial,
-			Scenes:     scenes,
-			Persist:    retain,
-		}
-	}
-}
-
-func MakeOption(name string, next Id, desc StateFunc[string], opts ...func(*Option)) Option {
-	o := Option{
+func MakeThread(name string, next Id, opts ...ThreadOption) Thread {
+	o := Thread{
 		Name: name,
 		Next: next,
-		Desc: desc,
 	}
 
 	for _, opt := range opts {
@@ -92,26 +70,34 @@ func MakeOption(name string, next Id, desc StateFunc[string], opts ...func(*Opti
 	return o
 }
 
-// Adds an event that will occur when the option is chosen.
+// Adds a description to the thread.
+// The description is evaluated for current active threads.
+func WithDesc(desc DynVal[string]) ThreadOption {
+	return func(o *Thread) {
+		o.Desc = desc
+	}
+}
+
+// Adds an event that will occur when the thread is traversed.
 // The returned string describes the outcome.
-func WithEvent(event StateFunc[string]) func(*Option) {
-	return func(o *Option) {
+func WithEvent(event DynVal[string]) ThreadOption {
+	return func(o *Thread) {
 		o.Event = event
 	}
 }
 
-// Modifies the Option to only be available if `condition` is met.
-// Scenes must have at least one Option without a condition.
-func WithCondition(condition StateFunc[bool]) func(*Option) {
-	return func(o *Option) {
+// Modifies the thread to only be active if `condition` is true.
+// Scenes will likely have at least one thread without a condition.
+func WithCondition(condition DynVal[bool]) ThreadOption {
+	return func(o *Thread) {
 		o.Condition = condition
 	}
 }
 
-// Modifies Option to use `override` outcome if `condition` is met.
+// Modifies thread to use this `next` and `event` if `condition` is met.
 // If multiple overrides are applicable, the first instance will be used.
-func WithOverride(next Id, event StateFunc[string], condition StateFunc[bool]) func(*Option) {
-	return func(o *Option) {
+func WithOverride(next Id, event DynVal[string], condition DynVal[bool]) ThreadOption {
+	return func(o *Thread) {
 		o.Overrides = append(o.Overrides, Override{
 			Next:      next,
 			Event:     event,
@@ -120,9 +106,21 @@ func WithOverride(next Id, event StateFunc[string], condition StateFunc[bool]) f
 	}
 }
 
-// A convenience function to return the constant val regardless of State.
-func Just[T any](val T) StateFunc[T] {
-	return func(_ *State) T {
-		return val
+// Always returns val regardless of any state.
+func Just[V any](val V) DynVal[V] {
+	return dyn.Static(val)
+}
+
+// Evaluates V using `fn` where the argument is a pointer to a system or an anonymous struct of multiple pointers to systems.
+func Dyn[I, V any](fn func(I) V) DynVal[V] {
+	if dyn.MultipleArg[I]() {
+		return dyn.Multiple(fn)
 	}
+
+	return dyn.Single(fn)
+}
+
+type DynVal[T any] interface {
+	Eval(*system.Collection) T
+	Systems() ([]reflect.Type, error)
 }

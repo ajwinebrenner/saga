@@ -1,10 +1,15 @@
 package saga
 
 import (
+	"errors"
 	"fmt"
 	"iter"
 	"maps"
+	"reflect"
 	"slices"
+
+	"github.com/ajwinebrenner/saga/internal/errs"
+	"github.com/ajwinebrenner/saga/internal/system"
 )
 
 type DuplicateIdError struct {
@@ -28,32 +33,51 @@ func (e UnknownIdError) Error() string {
 }
 
 const (
-	ErrEmptyId     = stringError("scene IDs must have a length greater than 0")
-	ErrEmptyGroup  = stringError("groups must contain at least one scene")
-	ErrEmptyOption = stringError("option names must have a length greater than 0")
+	ErrEmptyId     = errs.Static("scene IDs must have a length greater than 0")
+	ErrEmptySkein  = errs.Static("skeins must contain at least one scene")
+	ErrEmptyThread = errs.Static("thread names must have a length greater than 0")
 )
 
-func Build(root *Group, state *State) (*World, error) {
+// Weave builds a world using the root skein and any systems needed by dynamic values.
+// Any problems with scenes or threads that would cause an error during world traversal
+// will cause an error to be returned detailing which areas need remediation.
+func Weave(root *Skein, systems []any) (*World, error) {
 	builder := newBuilder()
 
-	r, err := builder.convertGroup(root)
+	r, err := builder.convertSkein(root)
 	if err != nil {
 		return nil, err
 	}
 
-	for pending := range builder.pendingGroups() {
-		group, err := builder.convertGroup(pending.group)
+	for pending := range builder.pendingSkeins() {
+		skein, err := builder.convertSkein(pending.skein)
 		if err != nil {
 			return nil, err
 		}
 
-		pending.parent.subGroups[pending.from] = group
+		pending.parent.skeins[pending.from] = skein
+	}
+
+	coll := system.NewCollection()
+	for i, s := range systems {
+		if err = coll.Add(s); err != nil {
+			return nil, fmt.Errorf("adding system %d to collection: %w", i, err)
+		}
+	}
+
+	systemErrors := make([]error, 0, len(builder.systemsNeeded))
+	for sysType := range builder.systemsNeeded {
+		_, err := coll.Get(sysType)
+		systemErrors = append(systemErrors, err)
+	}
+	if err = errors.Join(systemErrors...); err != nil {
+		return nil, fmt.Errorf("missing necessary systems: %w", err)
 	}
 
 	world := &World{
 		root:    r,
-		state:   state,
-		options: make(map[string]ValidOption),
+		systems: coll,
+		threads: make(map[string]ActiveThread),
 	}
 
 	world.collect()
@@ -63,12 +87,13 @@ func Build(root *Group, state *State) (*World, error) {
 type builder struct {
 	dupeSceneIds    map[Id]struct{}
 	unknownSceneIds map[Id]struct{}
-	pending         []pendingGroup
+	systemsNeeded   map[reflect.Type]struct{}
+	pending         []pendingSkein
 }
 
-type pendingGroup struct {
-	parent *group
-	group  *Group
+type pendingSkein struct {
+	parent *skein
+	skein  *Skein
 	from   Id
 }
 
@@ -76,11 +101,12 @@ func newBuilder() *builder {
 	return &builder{
 		dupeSceneIds:    make(map[Id]struct{}),
 		unknownSceneIds: make(map[Id]struct{}),
+		systemsNeeded:   make(map[reflect.Type]struct{}),
 	}
 }
 
-func (b *builder) pendingGroups() iter.Seq[pendingGroup] {
-	return func(yield func(pendingGroup) bool) {
+func (b *builder) pendingSkeins() iter.Seq[pendingSkein] {
+	return func(yield func(pendingSkein) bool) {
 		for len(b.pending) > 0 {
 			next := b.pending[len(b.pending)-1]
 			b.pending = b.pending[:len(b.pending)-1]
@@ -92,9 +118,9 @@ func (b *builder) pendingGroups() iter.Seq[pendingGroup] {
 	}
 }
 
-func (b *builder) convertGroup(g *Group) (*group, error) {
+func (b *builder) convertSkein(g *Skein) (*skein, error) {
 	if g == nil || len(g.Scenes) == 0 {
-		return nil, ErrEmptyGroup
+		return nil, ErrEmptySkein
 	}
 
 	existing := make(map[Id]struct{})
@@ -113,38 +139,24 @@ func (b *builder) convertGroup(g *Group) (*group, error) {
 		return nil, DuplicateIdError{ids: b.dupeSceneIds}
 	}
 
-	converted := &group{
-		current:   g.EntryScene,
-		entrance:  b.createEntrance(existing, g.EntryScene, g.Persist, g.AltEntries),
-		scenes:    make(map[Id]scene, len(g.Scenes)),
-		subGroups: make(map[Id]*group),
+	converted := &skein{
+		current:  g.EntryScene,
+		entrance: b.createEntrance(existing, g.EntryScene, g.Persist, g.AltEntries),
+		scenes:   make(map[Id]scene, len(g.Scenes)),
+		skeins:   make(map[Id]*skein),
 	}
 
+	var err error
 	for _, s := range g.Scenes {
-		options := make([]option, 0, len(s.Options))
-
-		for _, o := range s.Options {
-			if o.Name == "" {
-				return nil, ErrEmptyOption
-			}
-
-			options = append(options, option{
-				name:      o.Name,
-				desc:      o.Desc,
-				condition: o.Condition,
-				outcomer:  b.createOutcomer(existing, o.Next, o.Event, o.Overrides),
-			})
+		converted.scenes[s.Id], err = b.convertScene(existing, s)
+		if err != nil {
+			return nil, fmt.Errorf("weaving scene %q: %w", s.Id, err)
 		}
 
-		converted.scenes[s.Id] = scene{
-			desc:    s.Desc,
-			options: options,
-		}
-
-		if s.Group != nil {
-			b.pending = append(b.pending, pendingGroup{
+		if s.Skein != nil {
+			b.pending = append(b.pending, pendingSkein{
 				parent: converted,
-				group:  s.Group,
+				skein:  s.Skein,
 				from:   s.Id,
 			})
 		}
@@ -180,20 +192,73 @@ func (b *builder) createEntrance(existing map[Id]struct{}, entryScene Id, persis
 	}
 }
 
-func (b *builder) createOutcomer(existing map[Id]struct{}, next Id, event StateFunc[string], overrides []Override) outcomer {
+func (b *builder) convertScene(existing map[Id]struct{}, s Scene) (scene, error) {
+	err := addDynCheck(b, s.Desc)
+	if err != nil {
+		return scene{}, fmt.Errorf("desc: %w", err)
+	}
+
+	threads := make([]thread, 0, len(s.Threads))
+
+	for _, o := range s.Threads {
+		if o.Name == "" {
+			return scene{}, ErrEmptyThread
+		}
+
+		if err = addDynCheck(b, o.Desc); err != nil {
+			return scene{}, fmt.Errorf("%q: desc: %w", o.Name, err)
+		}
+		if err = addDynCheck(b, o.Condition); err != nil {
+			return scene{}, fmt.Errorf("%q: condition: %w", o.Name, err)
+		}
+
+		outcomer, err := b.createOutcomer(existing, o.Next, o.Event, o.Overrides)
+		if err != nil {
+			return scene{}, fmt.Errorf("%q: %w", o.Name, err)
+		}
+
+		threads = append(threads, thread{
+			name:      o.Name,
+			desc:      o.Desc,
+			condition: o.Condition,
+			outcomer:  outcomer,
+		})
+	}
+
+	return scene{
+		desc:    s.Desc,
+		threads: threads,
+	}, err
+}
+
+func (b *builder) createOutcomer(existing map[Id]struct{}, next Id, event DynVal[string], overrides []Override) (outcomer, error) {
 	if _, exists := existing[next]; !exists {
 		b.unknownSceneIds[next] = struct{}{}
 	}
 
+	err := addDynCheck(b, event)
+	if err != nil {
+		return outcomer{}, fmt.Errorf("event: %w", err)
+	}
+
 	// assume capacity for all as happy path
 	validOverrides := make([]Override, 0, len(overrides))
-	for _, override := range overrides {
+	for i, override := range overrides {
 		if _, exists := existing[override.Next]; !exists {
 			b.unknownSceneIds[override.Next] = struct{}{}
 		}
-		if override.Condition != nil {
-			validOverrides = append(validOverrides, override)
+		if override.Condition == nil {
+			continue
 		}
+
+		if err = addDynCheck(b, override.Condition); err != nil {
+			return outcomer{}, fmt.Errorf("override %d: condition: %w", i, err)
+		}
+		if err = addDynCheck(b, override.Event); err != nil {
+			return outcomer{}, fmt.Errorf("override %d: event: %w", i, err)
+		}
+
+		validOverrides = append(validOverrides, override)
 	}
 
 	// release capacity while still allowing build
@@ -205,13 +270,22 @@ func (b *builder) createOutcomer(existing map[Id]struct{}, next Id, event StateF
 		next:      next,
 		event:     event,
 		overrides: validOverrides,
-	}
+	}, nil
 }
 
-func safeStateFunc[T any](f StateFunc[T], state *State) T {
-	if f == nil {
-		var empty T
-		return empty
+func addDynCheck[T any](b *builder, val DynVal[T]) error {
+	if val == nil {
+		return nil
 	}
-	return f(state)
+
+	sysTypes, err := val.Systems()
+	if err != nil {
+		return err
+	}
+
+	for _, sysType := range sysTypes {
+		b.systemsNeeded[sysType] = struct{}{}
+	}
+
+	return nil
 }
