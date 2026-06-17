@@ -8,15 +8,15 @@ import (
 )
 
 func TestBuildEmpty(t *testing.T) {
-	t.Run("empty skein", func(t *testing.T) {
-		_, err := saga.Weave(&saga.Skein{}, nil)
-		assert.ErrorIs(t, err, saga.ErrEmptySkein)
-		_, err = saga.Weave(nil, nil)
-		assert.ErrorIs(t, err, saga.ErrEmptySkein)
+	t.Run("empty group", func(t *testing.T) {
+		_, err := saga.Build(&saga.Group{}, nil)
+		assert.ErrorIs(t, err, saga.ErrEmptyGroup)
+		_, err = saga.Build(nil, nil)
+		assert.ErrorIs(t, err, saga.ErrEmptyGroup)
 	})
 
 	t.Run("empty scene id", func(t *testing.T) {
-		root := saga.Skein{
+		root := saga.Group{
 			EntryScene: "a",
 			Scenes: []saga.Scene{
 				{Id: "a"},
@@ -24,17 +24,17 @@ func TestBuildEmpty(t *testing.T) {
 			},
 		}
 
-		_, err := saga.Weave(&root, nil)
+		_, err := saga.Build(&root, nil)
 		assert.ErrorIs(t, err, saga.ErrEmptyId)
 	})
 
 	t.Run("empty sub-scene id", func(t *testing.T) {
-		root := saga.Skein{
+		root := saga.Group{
 			EntryScene: "a",
 			Scenes: []saga.Scene{
 				{
 					Id: "a",
-					Skein: &saga.Skein{
+					SubScenes: &saga.Group{
 						EntryScene: "b",
 						Scenes: []saga.Scene{
 							{Id: "b"},
@@ -45,38 +45,38 @@ func TestBuildEmpty(t *testing.T) {
 			},
 		}
 
-		_, err := saga.Weave(&root, nil)
+		_, err := saga.Build(&root, nil)
 		assert.ErrorIs(t, err, saga.ErrEmptyId)
 	})
 
-	t.Run("empty thread name", func(t *testing.T) {
-		root := saga.Skein{
+	t.Run("empty choice name", func(t *testing.T) {
+		root := saga.Group{
 			EntryScene: "a",
 			Scenes: []saga.Scene{
 				{
 					Id: "a",
-					Threads: []saga.Thread{
-						{Name: "tob", Next: "b"},
+					Choices: []saga.Choice{
+						{Name: "tob", Route: saga.Route{To: "b"}},
 					},
 				},
 				{
 					Id: "b",
-					Threads: []saga.Thread{
-						{Name: "toa", Next: "a"},
-						{Name: "", Next: "a"},
+					Choices: []saga.Choice{
+						{Name: "toa", Route: saga.Route{To: "a"}},
+						{Name: "", Route: saga.Route{To: "a"}},
 					},
 				},
 			},
 		}
 
-		_, err := saga.Weave(&root, nil)
-		assert.ErrorIs(t, err, saga.ErrEmptyThread)
+		_, err := saga.Build(&root, nil)
+		assert.ErrorIs(t, err, saga.ErrEmptyChoice)
 	})
 }
 
 func TestBuildDuplicates(t *testing.T) {
 	t.Run("duplicate scene ids", func(t *testing.T) {
-		root := saga.Skein{
+		root := saga.Group{
 			EntryScene: "a",
 			Scenes: []saga.Scene{
 				{Id: "a"},
@@ -85,16 +85,16 @@ func TestBuildDuplicates(t *testing.T) {
 			},
 		}
 
-		_, err := saga.Weave(&root, nil)
+		_, err := saga.Build(&root, nil)
 		assert.ErrorContains(t, err, `duplicate IDs: ["a"]`)
 	})
 
 	t.Run("duplicates at different depth", func(t *testing.T) {
-		root := saga.Skein{
+		root := saga.Group{
 			EntryScene: "a",
 			Scenes: []saga.Scene{
 				{Id: "a"},
-				{Id: "b", Skein: &saga.Skein{
+				{Id: "b", SubScenes: &saga.Group{
 					EntryScene: "a",
 					Scenes: []saga.Scene{
 						{Id: "a"},
@@ -104,52 +104,46 @@ func TestBuildDuplicates(t *testing.T) {
 			},
 		}
 
-		_, err := saga.Weave(&root, nil)
+		_, err := saga.Build(&root, nil)
 		assert.NoError(t, err)
 	})
 }
 
 func TestBuildUnknown(t *testing.T) {
-	t.Run("entry scenes", func(t *testing.T) {
-		root := saga.Skein{
+	t.Run("entry scene", func(t *testing.T) {
+		root := saga.Group{
 			EntryScene: "b",
-			AltEntries: []saga.AltEntry{
-				{
-					Scene: "c",
-					From:  "foo",
-				},
-			},
 			Scenes: []saga.Scene{
 				{Id: "a"},
 			},
 		}
 
-		_, err := saga.Weave(&root, nil)
-		assert.ErrorContains(t, err, `unknown IDs: ["b" "c"]`)
+		_, err := saga.Build(&root, nil)
+		assert.ErrorContains(t, err, `unknown IDs: ["b"]`)
 	})
 
-	t.Run("outcome scenes", func(t *testing.T) {
-		root := saga.Skein{
+	t.Run("choice scenes", func(t *testing.T) {
+		root := saga.Group{
 			EntryScene: "a",
 			Scenes: []saga.Scene{
-				{Id: "a", Threads: []saga.Thread{
+				{Id: "a", Choices: []saga.Choice{
 					{
-						Name: "tob",
-						Next: "b",
+						Name:  "tob",
+						Route: saga.Route{To: "b"},
 					},
 					{
-						Name: "toc",
-						Next: "c",
+						Name:  "toc",
+						Route: saga.Route{To: "c"},
 					},
 				}},
-				{Id: "b", Threads: []saga.Thread{
+				{Id: "b", Choices: []saga.Choice{
 					{
-						Name: "toa",
-						Next: "a",
-						Overrides: []saga.Override{
+						Name:  "toa",
+						Route: saga.Route{To: "a"},
+						Overrides: []saga.Route{
 							{
-								Next:      "d",
-								Condition: nil,
+								To:     "d",
+								Active: nil,
 							},
 						},
 					},
@@ -157,7 +151,25 @@ func TestBuildUnknown(t *testing.T) {
 			},
 		}
 
-		_, err := saga.Weave(&root, nil)
+		_, err := saga.Build(&root, nil)
+		assert.ErrorContains(t, err, `unknown IDs: ["c" "d"]`)
+	})
+
+	t.Run("reroute scenes", func(t *testing.T) {
+		root := saga.Group{
+			EntryScene: "a",
+			Scenes: []saga.Scene{
+				{Id: "a", Reroutes: []saga.Route{
+					{To: "b", Active: saga.Just(true)},
+					{To: "c", Active: nil},
+				}},
+				{Id: "b", Reroutes: []saga.Route{
+					{To: "d", Active: saga.Just(true)},
+				}},
+			},
+		}
+
+		_, err := saga.Build(&root, nil)
 		assert.ErrorContains(t, err, `unknown IDs: ["c" "d"]`)
 	})
 }
@@ -168,7 +180,7 @@ type dummySystem struct {
 
 func TestBuildSystems(t *testing.T) {
 	t.Run("invalid system", func(t *testing.T) {
-		root := saga.Skein{
+		root := saga.Group{
 			EntryScene: "a",
 			Scenes: []saga.Scene{
 				{Id: "a"},
@@ -176,43 +188,45 @@ func TestBuildSystems(t *testing.T) {
 		}
 
 		primitive := "str"
-		_, err := saga.Weave(&root, []any{primitive})
+		_, err := saga.Build(&root, []any{primitive})
 		assert.ErrorContains(t, err, "adding system 0")
-		_, err = saga.Weave(&root, []any{&primitive})
+		_, err = saga.Build(&root, []any{&primitive})
 		assert.ErrorContains(t, err, "adding system 0")
 
 		unnamed := struct{}{}
-		_, err = saga.Weave(&root, []any{unnamed})
+		_, err = saga.Build(&root, []any{unnamed})
 		assert.ErrorContains(t, err, "adding system 0")
-		_, err = saga.Weave(&root, []any{&unnamed})
+		_, err = saga.Build(&root, []any{&unnamed})
 		assert.ErrorContains(t, err, "adding system 0")
 
 		valid := dummySystem{}
-		_, err = saga.Weave(&root, []any{valid})
+		_, err = saga.Build(&root, []any{valid})
 		assert.ErrorContains(t, err, "adding system 0")
-		_, err = saga.Weave(&root, []any{&valid, &valid})
+		_, err = saga.Build(&root, []any{&valid, &valid})
 		assert.ErrorContains(t, err, "adding system 1")
 	})
 
-	validSkein := func() saga.Skein {
-		return saga.Skein{
+	validGroup := func() saga.Group {
+		return saga.Group{
 			EntryScene: "a",
 			Scenes: []saga.Scene{
 				{
 					Id:   "a",
 					Desc: saga.Dyn(func(sys *dummySystem) string { return sys.s }),
-					Threads: []saga.Thread{
+					Choices: []saga.Choice{
 						{
-							Name:      "tob",
-							Next:      "b",
-							Desc:      saga.Dyn(func(sys *dummySystem) string { return sys.s }),
-							Event:     saga.Dyn(func(sys *dummySystem) string { return sys.s }),
-							Condition: saga.Dyn(func(sys *dummySystem) bool { return sys.s == "" }),
-							Overrides: []saga.Override{
+							Name: "tob",
+							Desc: saga.Dyn(func(sys *dummySystem) string { return sys.s }),
+							Route: saga.Route{
+								To:     "b",
+								Event:  saga.Dyn(func(sys *dummySystem) string { return sys.s }),
+								Active: saga.Dyn(func(sys *dummySystem) bool { return sys.s == "" }),
+							},
+							Overrides: []saga.Route{
 								{
-									Next:      "b",
-									Event:     saga.Dyn(func(sys *dummySystem) string { return sys.s }),
-									Condition: saga.Dyn(func(sys *dummySystem) bool { return sys.s == "" }),
+									To:     "b",
+									Event:  saga.Dyn(func(sys *dummySystem) string { return sys.s }),
+									Active: saga.Dyn(func(sys *dummySystem) bool { return sys.s == "" }),
 								},
 							},
 						},
@@ -220,6 +234,13 @@ func TestBuildSystems(t *testing.T) {
 				},
 				{
 					Id: "b",
+					Reroutes: []saga.Route{
+						{
+							To:     "a",
+							Event:  saga.Dyn(func(sys *dummySystem) string { return sys.s }),
+							Active: saga.Dyn(func(sys *dummySystem) bool { return sys.s == "" }),
+						},
+					},
 				},
 			},
 		}
@@ -229,44 +250,54 @@ func TestBuildSystems(t *testing.T) {
 		invalidDynStr := saga.Dyn(func(sys dummySystem) string { return sys.s })
 		invalidDynBool := saga.Dyn(func(sys dummySystem) bool { return sys.s == "" })
 
-		root := validSkein()
+		root := validGroup()
 		root.Scenes[0].Desc = invalidDynStr
-		_, err := saga.Weave(&root, []any{&dummySystem{}})
+		_, err := saga.Build(&root, []any{&dummySystem{}})
 		assert.ErrorContains(t, err, `"a": desc`)
 
-		root = validSkein()
-		root.Scenes[0].Threads[0].Desc = invalidDynStr
-		_, err = saga.Weave(&root, []any{&dummySystem{}})
+		root = validGroup()
+		root.Scenes[0].Choices[0].Desc = invalidDynStr
+		_, err = saga.Build(&root, []any{&dummySystem{}})
 		assert.ErrorContains(t, err, `"a": "tob": desc`)
 
-		root = validSkein()
-		root.Scenes[0].Threads[0].Event = invalidDynStr
-		_, err = saga.Weave(&root, []any{&dummySystem{}})
-		assert.ErrorContains(t, err, `"a": "tob": event`)
+		root = validGroup()
+		root.Scenes[0].Choices[0].Route.Event = invalidDynStr
+		_, err = saga.Build(&root, []any{&dummySystem{}})
+		assert.ErrorContains(t, err, `"a": "tob": route: event`)
 
-		root = validSkein()
-		root.Scenes[0].Threads[0].Condition = invalidDynBool
-		_, err = saga.Weave(&root, []any{&dummySystem{}})
-		assert.ErrorContains(t, err, `"a": "tob": condition`)
+		root = validGroup()
+		root.Scenes[0].Choices[0].Route.Active = invalidDynBool
+		_, err = saga.Build(&root, []any{&dummySystem{}})
+		assert.ErrorContains(t, err, `"a": "tob": route: active`)
 
-		root = validSkein()
-		root.Scenes[0].Threads[0].Overrides[0].Event = invalidDynStr
-		_, err = saga.Weave(&root, []any{&dummySystem{}})
-		assert.ErrorContains(t, err, `"a": "tob": override 0: event`)
+		root = validGroup()
+		root.Scenes[0].Choices[0].Overrides[0].Event = invalidDynStr
+		_, err = saga.Build(&root, []any{&dummySystem{}})
+		assert.ErrorContains(t, err, `"a": "tob": override[0]: event`)
 
-		root = validSkein()
-		root.Scenes[0].Threads[0].Overrides[0].Condition = invalidDynBool
-		_, err = saga.Weave(&root, []any{&dummySystem{}})
-		assert.ErrorContains(t, err, `"a": "tob": override 0: condition`)
+		root = validGroup()
+		root.Scenes[0].Choices[0].Overrides[0].Active = invalidDynBool
+		_, err = saga.Build(&root, []any{&dummySystem{}})
+		assert.ErrorContains(t, err, `"a": "tob": override[0]: active`)
+
+		root = validGroup()
+		root.Scenes[1].Reroutes[0].Event = invalidDynStr
+		_, err = saga.Build(&root, []any{&dummySystem{}})
+		assert.ErrorContains(t, err, `"b": reroute[0]: event`)
+
+		root = validGroup()
+		root.Scenes[1].Reroutes[0].Active = invalidDynBool
+		_, err = saga.Build(&root, []any{&dummySystem{}})
+		assert.ErrorContains(t, err, `"b": reroute[0]: active`)
 	})
 
 	t.Run("missing systems", func(t *testing.T) {
-		root := validSkein()
+		root := validGroup()
 
-		_, err := saga.Weave(&root, []any{&dummySystem{}})
+		_, err := saga.Build(&root, []any{&dummySystem{}})
 		assert.NoError(t, err)
 
-		_, err = saga.Weave(&root, nil)
+		_, err = saga.Build(&root, nil)
 		assert.ErrorContains(t, err, "missing necessary systems")
 	})
 }

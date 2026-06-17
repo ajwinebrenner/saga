@@ -12,40 +12,42 @@ import (
 )
 
 type World struct {
-	root    *skein
-	systems *system.Collection
+	root    *group
+	state   *system.Collection
 	prompt  prompt
-	threads map[string]ActiveThread
+	choices map[string]ActiveChoice
 }
 
 type prompt struct {
 	desc []string
-	skip []bool
+	same []bool // (as previous)
 }
 
-type ActiveThread struct {
+type ActiveChoice struct {
 	Name  string
 	Desc  string
 	Depth uint
 }
 
-type skein struct {
-	current  Id
-	entrance entrance
-	scenes   map[Id]scene
-	skeins   map[Id]*skein
+type group struct {
+	entry   Id
+	current Id
+	persist bool
+	scenes  map[Id]scene
+	groups  map[Id]*group
 }
 
 type scene struct {
-	desc    DynVal[string]
-	threads []thread
+	desc     DynVal[string]
+	choices  []choice
+	reroutes []Route
 }
 
-type thread struct {
+type choice struct {
 	name      string
-	condition DynVal[bool]
 	desc      DynVal[string]
-	outcomer  outcomer
+	route     Route
+	overrides []Route
 }
 
 // Iterator over scene desc strings from each level of the world in descending order.
@@ -53,7 +55,7 @@ type thread struct {
 // Empty or previously seen descriptions are omitted from the returned values.
 func (w *World) Prompt() iter.Seq[string] {
 	return func(yield func(string) bool) {
-		for i, skip := range w.prompt.skip {
+		for i, skip := range w.prompt.same {
 			if !skip && !yield(w.prompt.desc[i]) {
 				return
 			}
@@ -61,14 +63,14 @@ func (w *World) Prompt() iter.Seq[string] {
 	}
 }
 
-// Threads returns a list of ActiveThread according to current world state.
-// Threads are sorted by depth, allowing handling of threads from different levels.
-// Repeated calls Threads do not produce side effects from any DynVal calls.
-// If conflicting thread names occur, only the deepest thread is considered.
-func (w *World) Threads() []ActiveThread {
-	threads := slices.Collect(maps.Values(w.threads))
+// Choices returns a list of ActiveChoice according to current world state.
+// Choices are sorted by depth, allowing handling of threads from different levels.
+// Repeated calls to Choices do not produce side effects from any DynVal calls.
+// If conflicting choice names occur, only the deepest choice is considered.
+func (w *World) Choices() []ActiveChoice {
+	threads := slices.Collect(maps.Values(w.choices))
 
-	slices.SortFunc(threads, func(a ActiveThread, b ActiveThread) int {
+	slices.SortFunc(threads, func(a ActiveChoice, b ActiveChoice) int {
 		if depthDiff := int(a.Depth - b.Depth); depthDiff != 0 {
 			return depthDiff
 		}
@@ -78,135 +80,150 @@ func (w *World) Threads() []ActiveThread {
 	return threads
 }
 
-// If thread is active, the thread will be used to find the next scene and associated event.
-// World state is updated to reflect the outcome of the choosing this thread.
-// The returned string describes the outcome, but can be empty.
-// If thread is inactive, a ThreadNotFoundError will be returned.
-func (w *World) Choose(thread string) (string, error) {
-	desc, err := w.followThread(thread)
+// If choice is active, the choice will be used to find the next scene and associated event.
+// World state is updated to reflect the outcome of the choosing this choice.
+// The returned slice describes the choice outcome and any reroute events, but can be nil.
+// If choice is inactive or doesn't exist, a ChoiceNotFoundError will be returned.
+// Reroutes are always applied in order of descending depth
+// and before evaluating the prompt and active choices.
+func (w *World) Choose(name string) ([]string, error) {
+	desc, err := w.followChoice(name)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	w.collect()
 	return desc, nil
 }
 
-// Collects all active threads and descriptions for current world state.
+// Collects all active choices and scene descriptions for current world state.
 // This should be called once between updates to world state as dynamic values may have side effects.
 func (w *World) collect() {
-	clear(w.threads)
+	clear(w.choices)
 
 	currentDepth := uint(0)
-	currentSkein := w.root
-	for currentSkein != nil {
-		currentScene := currentSkein.scenes[currentSkein.current]
+	currentGroup := w.root
+	for currentGroup != nil {
+		currentScene := currentGroup.scenes[currentGroup.current]
 
-		for _, thread := range currentScene.threads {
-			if thread.condition == nil || thread.condition.Eval(w.systems) {
-				w.threads[thread.name] = ActiveThread{
-					Name:  thread.name,
-					Desc:  safeEval(thread.desc, w.systems),
+		for _, choices := range currentScene.choices {
+			if choices.route.Active == nil || choices.route.Active.Eval(w.state) {
+				w.choices[choices.name] = ActiveChoice{
+					Name:  choices.name,
+					Desc:  safeEval(choices.desc, w.state),
 					Depth: currentDepth,
 				}
 			}
 		}
 
-		desc := safeEval(currentScene.desc, w.systems)
+		desc := safeEval(currentScene.desc, w.state)
 		if len(w.prompt.desc) > int(currentDepth) {
-			w.prompt.skip[currentDepth] = desc == "" || desc == w.prompt.desc[currentDepth]
+			w.prompt.same[currentDepth] = desc == "" || desc == w.prompt.desc[currentDepth]
 			w.prompt.desc[currentDepth] = desc
 		} else {
-			w.prompt.skip = append(w.prompt.skip, desc == "")
+			w.prompt.same = append(w.prompt.same, desc == "")
 			w.prompt.desc = append(w.prompt.desc, desc)
 		}
 
 		currentDepth++
-		currentSkein = currentSkein.skeins[currentSkein.current]
+		currentGroup = currentGroup.groups[currentGroup.current]
 	}
 
-	w.prompt.skip = w.prompt.skip[:currentDepth]
+	w.prompt.same = w.prompt.same[:currentDepth]
 	w.prompt.desc = w.prompt.desc[:currentDepth]
 }
 
-const errCorruptWorldState = errs.Static("internal world state corruption")
+const (
+	errCorruptWorldState = errs.Static("internal world state corruption")
+	errMissingScene      = errs.Static("expected scene not present in build")
+)
 
-type ThreadNotFoundError struct {
+type ChoiceNotFoundError struct {
 	name string
 }
 
-func (e ThreadNotFoundError) Error() string {
-	return fmt.Sprintf("thread %q not found", e.name)
+func (e ChoiceNotFoundError) Error() string {
+	return fmt.Sprintf("choice %q not found", e.name)
 }
 
-// Takes unsanitised input and traverses the active thread if found.
+// Takes unsanitised input and traverses the active choice if found.
 // If active, a description of the outcome is returned.
-func (w *World) followThread(name string) (string, error) {
-	choice, ok := w.threads[name]
+func (w *World) followChoice(name string) ([]string, error) {
+	chosen, ok := w.choices[name]
 	if !ok {
-		return "", ThreadNotFoundError{name: name}
+		return nil, ChoiceNotFoundError{name: name}
 	}
 
-	skein := w.root
-	for d := uint(0); d < choice.Depth && skein != nil; d++ {
-		skein = skein.skeins[skein.current]
+	grp := w.root
+	for d := uint(0); d < chosen.Depth && grp != nil; d++ {
+		grp = grp.groups[grp.current]
 	}
 
 	// should only happen if internal state is incorrectly altered after collect
-	if skein == nil {
-		return "", errCorruptWorldState
+	if grp == nil {
+		return nil, errCorruptWorldState
 	}
-	threads := skein.scenes[skein.current].threads
-	threadIdx := slices.IndexFunc(threads, func(t thread) bool { return t.name == name })
-	if threadIdx < 0 {
-		return "", errCorruptWorldState
+	choices := grp.scenes[grp.current].choices
+	choiceIdx := slices.IndexFunc(choices, func(c choice) bool { return c.name == name })
+	if choiceIdx < 0 {
+		return nil, errCorruptWorldState // should be in sync with w.choices
 	}
 
-	previousId := skein.current
+	var outcomes []string
 
-	outcome := threads[threadIdx].outcomer.outcome(w.systems)
-	skein.current = outcome.next
+	outcome := choices[choiceIdx].outcome(w.state)
+	if outcome.desc != "" {
+		outcomes = append(outcomes, outcome.desc)
+	}
 
-	skein = skein.skeins[skein.current]
-	for skein != nil {
-		entryId := skein.entrance.calc(previousId)
-		if entryId == "" {
-			break
+	err := grp.update(outcome.next)
+	if err != nil {
+		return nil, err
+	}
+
+	// reroutes
+	grp = w.root
+	scene := grp.scenes[grp.current]
+
+	for grp != nil {
+		var active *Route
+		for _, rr := range scene.reroutes {
+			if safeEval(rr.Active, w.state) {
+				active = &rr
+				break
+			}
 		}
 
-		skein.current = entryId
-		skein = skein.skeins[skein.current]
-	}
+		if active != nil {
+			grp.update(active.To)
+			if outcome := safeEval(active.Event, w.state); outcome != "" {
+				outcomes = append(outcomes, outcome)
+			}
 
-	return outcome.desc, nil
-}
-
-type entrance struct {
-	standard Id
-	persist  bool
-	alts     map[Id]Id
-}
-
-// `from` is the scene ID before choosing the most recent thread.
-// Empty string indicates no further scenes should be changed.
-func (e entrance) calc(from Id) Id {
-	if e.alts != nil {
-		if alt, ok := e.alts[from]; ok {
-			return alt
+			if active.To != grp.current { // stop infinite loop
+				continue // keep checking for reroutes before descent
+			}
 		}
+
+		grp = grp.groups[grp.current]
 	}
 
-	if e.persist {
-		return ""
-	}
-
-	return e.standard
+	return outcomes, err
 }
 
-type outcomer struct {
-	next      Id
-	event     DynVal[string]
-	overrides []Override
+func (g *group) update(next Id) error {
+	if _, ok := g.scenes[next]; !ok {
+		return errCorruptWorldState
+	}
+
+	g.current = next
+	sub := g.groups[next]
+	for sub != nil && !sub.persist {
+		sub.current = sub.entry
+		sub = sub.groups[sub.entry]
+	}
+
+	return nil
 }
 
 type outcome struct {
@@ -214,26 +231,26 @@ type outcome struct {
 	desc string
 }
 
-func (o outcomer) outcome(state *system.Collection) outcome {
-	for _, override := range o.overrides {
-		if safeEval(override.Condition, state) {
+func (c choice) outcome(state *system.Collection) outcome {
+	for _, override := range c.overrides {
+		if safeEval(override.Active, state) {
 			return outcome{
-				next: override.Next,
+				next: override.To,
 				desc: safeEval(override.Event, state),
 			}
 		}
 	}
 
 	return outcome{
-		next: o.next,
-		desc: safeEval(o.event, state),
+		next: c.route.To,
+		desc: safeEval(c.route.Event, state),
 	}
 }
 
-func safeEval[T any](v DynVal[T], coll *system.Collection) T {
+func safeEval[T any](v DynVal[T], state *system.Collection) T {
 	if v == nil {
 		var empty T
 		return empty
 	}
-	return v.Eval(coll)
+	return v.Eval(state)
 }

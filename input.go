@@ -10,57 +10,51 @@ import (
 type Id string
 
 // A collection of scenes with a default starting or entry scene.
-// Scenes may only reference other scenes within the same skein.
-// Persist retains the last scene visited when traversing back to this skein.
-type Skein struct {
+// Scenes may only reference other scenes within the same group.
+// Persist retains the last scene visited when traversing back to this group.
+type Group struct {
 	EntryScene Id
 	Persist    bool
-	AltEntries []AltEntry
 	Scenes     []Scene
 }
 
-// Specifies an alternative initial scene when entering the skein.
-// Only applies when `From` matches the previous scene (parent sibling).
-type AltEntry struct {
-	Scene Id
-	From  Id
-}
-
-// The main component of the world. A Scene can represent a location, or moment of decision.
-// `Id` must be unique within the same skein. The prompt for any given world state is comprised of
-// `Desc` for each current scene, avoiding repetition when the description doesn't change.
+// The main component of the world, the nodes by which one traverses events.
+// A Scene could represent a location, a moment of decision, or narrative exposition.
+// `Id` must be unique within the same group.
+// The prompt for any given world state is comprised of `Desc` for the current scene and sub-scenes.
+// `Desc` is evaluated for every prompt but is excluded if it hasn't changed for a given scene.
 type Scene struct {
-	Id      Id
-	Desc    DynVal[string]
-	Threads []Thread
-	Skein   *Skein // likely to be sparse (nil)
+	Id        Id
+	Desc      DynVal[string]
+	Choices   []Choice // manually chosen by input
+	Reroutes  []Route  // automatically followed when active
+	SubScenes *Group   // more likely to be sparse (nil)
 }
 
-// A `Thread` primarily enables traversal from one scene to another. `Name` must not be an empty string.
-// Threads that appear last will take precedence when a name is used by more than one thread.
-// `Next` must refer to a scene in the same skein and can refer to the same scene the thread belongs to.
-type Thread struct {
+// The primary traversal method between scenes. The identifier `Name` must not be empty.
+// Choices that appear last will take precedence when a name is used by more than one choice.
+// Routes must refer to a scene in the same group, it may be the same scene the choice belongs to.
+type Choice struct {
 	Name      string
-	Next      Id
-	Desc      DynVal[string] // Eval once when active for the current scene, describes thread before choosing
-	Event     DynVal[string] // Eval once when the thread is chosen, returns description of outcome
-	Condition DynVal[bool]   // Determines whether thread is active, if nil, thread is always active
-	Overrides []Override
+	Desc      DynVal[string] // Eval once when active for the current scene, describes before choosing
+	Route     Route          // Standard route, `Active` applies to entire Choice
+	Overrides []Route
 }
 
-// The first Override where `Condition` is true will replace `Next` and `Event` on the parent thread.
-type Override struct {
-	Next      Id
-	Event     DynVal[string]
-	Condition DynVal[bool]
+// Describes the where (To) and the what (Event) of traversal between scenes.
+// `Active` evaluates to false if nil, except for `Choice.Route` which is true by default.
+type Route struct {
+	To     Id
+	Event  DynVal[string]
+	Active DynVal[bool]
 }
 
-type ThreadOption func(*Thread)
+type ChoiceOpt func(*Choice)
 
-func MakeThread(name string, next Id, opts ...ThreadOption) Thread {
-	o := Thread{
-		Name: name,
-		Next: next,
+func MakeChoice(name string, to Id, opts ...ChoiceOpt) Choice {
+	o := Choice{
+		Name:  name,
+		Route: Route{To: to},
 	}
 
 	for _, opt := range opts {
@@ -70,38 +64,38 @@ func MakeThread(name string, next Id, opts ...ThreadOption) Thread {
 	return o
 }
 
-// Adds a description to the thread.
-// The description is evaluated for current active threads.
-func WithDesc(desc DynVal[string]) ThreadOption {
-	return func(o *Thread) {
+// Adds a description to the choice.
+// The description is evaluated for current active choices.
+func WithDesc(desc DynVal[string]) ChoiceOpt {
+	return func(o *Choice) {
 		o.Desc = desc
 	}
 }
 
-// Adds an event that will occur when the thread is traversed.
-// The returned string describes the outcome.
-func WithEvent(event DynVal[string]) ThreadOption {
-	return func(o *Thread) {
-		o.Event = event
+// Adds an event that will occur when the choice is chosen.
+// The returned string describes the choice's outcome.
+func WithEvent(event DynVal[string]) ChoiceOpt {
+	return func(o *Choice) {
+		o.Route.Event = event
 	}
 }
 
-// Modifies the thread to only be active if `condition` is true.
+// Modifies the choice to only be active if `condition` is true.
 // Scenes will likely have at least one thread without a condition.
-func WithCondition(condition DynVal[bool]) ThreadOption {
-	return func(o *Thread) {
-		o.Condition = condition
+func WithCondition(condition DynVal[bool]) ChoiceOpt {
+	return func(o *Choice) {
+		o.Route.Active = condition
 	}
 }
 
-// Modifies thread to use this `next` and `event` if `condition` is met.
-// If multiple overrides are applicable, the first instance will be used.
-func WithOverride(next Id, event DynVal[string], condition DynVal[bool]) ThreadOption {
-	return func(o *Thread) {
-		o.Overrides = append(o.Overrides, Override{
-			Next:      next,
-			Event:     event,
-			Condition: condition,
+// Modifies choice to use this `to` and `event` if `condition` is met.
+// The first override that is applicable will be used.
+func WithOverride(next Id, event DynVal[string], condition DynVal[bool]) ChoiceOpt {
+	return func(o *Choice) {
+		o.Overrides = append(o.Overrides, Route{
+			To:     next,
+			Event:  event,
+			Active: condition,
 		})
 	}
 }

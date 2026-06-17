@@ -13,10 +13,10 @@ This would seem to necessitate some kind of build step to handle the heavy lifti
 
 This package provides a structure of scenes called a world, built from declarative input.
 Each scene can represent a location or a point in time; a story beat or moment of decision.
-Scenes have threads (akin to graph edges) that when followed, lead to other scenes and consequences.
+Scenes have routes (akin to graph edges) that when followed, lead to other scenes and consequences.
 
-Scenes may also contain other scenes so that all threads on a parent scene are available to all sub-scenes.
-This grouping of scenes along with features such as conditional threads and overriding thread outcomes
+Scenes may also contain other scenes so that all choices on a parent scene are available to all sub-scenes.
+This grouping of scenes along with features such as conditional choices and overriding outcomes
 makes traversal of the world more dynamic than traditional pen and paper interactive fiction.
 
 ## State
@@ -37,6 +37,6 @@ This fulfils the original goal of this package, to create a safe collection of s
 
 ## World
 
-The world returned from `Weave` has a small set of methods for interacting with world state.
-Included methods can read the current description of the world, list available threads, and choose a thread to progress.
+The world returned from `Build` has a small set of methods for interacting with world state.
+Included methods can read the current description of the world, list available choices, and make a choice to progress.
 The way an end user might interact with the world is flexible, the simplest way being a purely text-based REPL.

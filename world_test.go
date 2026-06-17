@@ -9,19 +9,19 @@ import (
 )
 
 func TestWorld(t *testing.T) {
-	root := testSkein()
+	root := testGroup()
 	sys := testSystem{
 		toggle: false,
 		count:  0,
 	}
 
-	world, err := Weave(&root, []any{&sys})
+	world, err := Build(&root, []any{&sys})
 	require.NoError(t, err)
 
 	type exp struct {
-		event   string
+		outcome []string
 		prompt  []string
-		threads []ActiveThread
+		threads []ActiveChoice
 	}
 
 	for _, step := range []struct {
@@ -32,9 +32,9 @@ func TestWorld(t *testing.T) {
 		{
 			next: "tob",
 			expected: exp{
-				event:  "going to b",
-				prompt: nil,
-				threads: []ActiveThread{{
+				outcome: []string{"going to b"},
+				prompt:  nil,
+				threads: []ActiveChoice{{
 					Name:  "toa",
 					Desc:  "",
 					Depth: 0,
@@ -44,9 +44,9 @@ func TestWorld(t *testing.T) {
 		{
 			next: "toa",
 			expected: exp{
-				event:  "",
-				prompt: []string{"start"},
-				threads: []ActiveThread{
+				outcome: nil,
+				prompt:  []string{"start"},
+				threads: []ActiveChoice{
 					{
 						Name:  "tob",
 						Desc:  "go to b",
@@ -62,9 +62,9 @@ func TestWorld(t *testing.T) {
 		{
 			next: "toc",
 			expected: exp{
-				event:  "",
-				prompt: []string{"count: 0", "sub-scene"},
-				threads: []ActiveThread{
+				outcome: nil,
+				prompt:  []string{"count: 0", "sub-scene"},
+				threads: []ActiveChoice{
 					{
 						Name:  "to2",
 						Desc:  "go to 2",
@@ -76,9 +76,9 @@ func TestWorld(t *testing.T) {
 		{
 			next: "to2",
 			expected: exp{
-				event:  "going to 2",
-				prompt: nil,
-				threads: []ActiveThread{
+				outcome: []string{"going to 2"},
+				prompt:  nil,
+				threads: []ActiveChoice{
 					{
 						Name:  "long3",
 						Depth: 1,
@@ -100,9 +100,9 @@ func TestWorld(t *testing.T) {
 				sys.count++
 			},
 			expected: exp{
-				event:  "",
-				prompt: []string{"count: 1"},
-				threads: []ActiveThread{
+				outcome: nil,
+				prompt:  []string{"count: 1"},
+				threads: []ActiveChoice{
 					{
 						Name:  "long3",
 						Depth: 1,
@@ -124,9 +124,9 @@ func TestWorld(t *testing.T) {
 				sys.count++
 			},
 			expected: exp{
-				event:  "taking the long way to 3",
-				prompt: []string{"count: 2", "you are at 3"},
-				threads: []ActiveThread{
+				outcome: []string{"taking the long way to 3"},
+				prompt:  []string{"count: 2", "you are at 3"},
+				threads: []ActiveChoice{
 					{
 						Name:  "to1",
 						Depth: 1,
@@ -137,9 +137,9 @@ func TestWorld(t *testing.T) {
 		{
 			next: "to1",
 			expected: exp{
-				event:  "",
-				prompt: []string{"sub-scene"},
-				threads: []ActiveThread{
+				outcome: nil,
+				prompt:  []string{"sub-scene"},
+				threads: []ActiveChoice{
 					{
 						Name:  "to2",
 						Desc:  "go to 2",
@@ -154,12 +154,17 @@ func TestWorld(t *testing.T) {
 				sys.toggle = true
 			},
 			expected: exp{
-				event:  "failed to go to 2",
-				prompt: nil,
-				threads: []ActiveThread{
+				outcome: []string{"failed to go to 2"},
+				prompt:  nil,
+				threads: []ActiveChoice{
 					{
 						Name:  "toa",
 						Depth: 0,
+					},
+					{
+						Name:  "secret",
+						Desc:  "a hidden way to 2",
+						Depth: 1,
 					},
 					{
 						Name:  "to2",
@@ -172,9 +177,9 @@ func TestWorld(t *testing.T) {
 		{
 			next: "toa",
 			expected: exp{
-				event:  "",
-				prompt: []string{"start"},
-				threads: []ActiveThread{
+				outcome: nil,
+				prompt:  []string{"start"},
+				threads: []ActiveChoice{
 					{
 						Name:  "tob",
 						Desc:  "go to b",
@@ -190,9 +195,9 @@ func TestWorld(t *testing.T) {
 		{
 			next: "tob",
 			expected: exp{
-				event:  "going to b",
-				prompt: nil,
-				threads: []ActiveThread{
+				outcome: []string{"going to b"},
+				prompt:  nil,
+				threads: []ActiveChoice{
 					{
 						Name:  "toa",
 						Depth: 0,
@@ -203,9 +208,53 @@ func TestWorld(t *testing.T) {
 		{
 			next: "toa",
 			expected: exp{
-				event:  "going to c instead",
-				prompt: []string{"count: 2"},
-				threads: []ActiveThread{
+				outcome: []string{"going to c instead"},
+				prompt:  []string{"count: 2", "sub-scene"},
+				threads: []ActiveChoice{
+					{
+						Name:  "toa",
+						Depth: 0,
+					},
+					{
+						Name:  "secret",
+						Desc:  "a hidden way to 2",
+						Depth: 1,
+					},
+					{
+						Name:  "to2",
+						Desc:  "go to 2",
+						Depth: 1,
+					},
+				},
+			},
+		},
+		{
+			next: "secret",
+			preFunc: func() {
+				sys.reroute = true
+			},
+			expected: exp{
+				outcome: []string{"rerouting!"},
+				prompt:  []string{"start"},
+				threads: []ActiveChoice{
+					{
+						Name:  "tob",
+						Desc:  "go to b",
+						Depth: 0,
+					},
+					{
+						Name:  "toc",
+						Depth: 0,
+					},
+				},
+			},
+		},
+		{
+			next: "toc", // straight to 2 (persist and previous destination before reroute)
+			expected: exp{
+				outcome: nil,
+				prompt:  []string{"count: 2"},
+				threads: []ActiveChoice{
 					{
 						Name:  "toa",
 						Depth: 0,
@@ -230,10 +279,10 @@ func TestWorld(t *testing.T) {
 			step.preFunc()
 		}
 
-		event, err := world.Choose(step.next)
+		outcome, err := world.Choose(step.next)
 		assert.NoError(t, err)
-		assert.Equal(t, step.expected.event, event)
+		assert.Equal(t, step.expected.outcome, outcome)
 		assert.Equal(t, step.expected.prompt, slices.Collect(world.Prompt()))
-		assert.Equal(t, step.expected.threads, world.Threads())
+		assert.Equal(t, step.expected.threads, world.Choices())
 	}
 }
