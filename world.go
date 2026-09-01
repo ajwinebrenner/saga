@@ -169,61 +169,79 @@ func (w *World) followChoice(name string) ([]string, error) {
 		return nil, errCorruptWorldState // should be in sync with w.choices
 	}
 
-	var outcomes []string
+	var allOutcomes []string
 
 	outcome := choices[choiceIdx].outcome(w.state)
 	if outcome.desc != "" {
-		outcomes = append(outcomes, outcome.desc)
+		allOutcomes = append(allOutcomes, outcome.desc)
 	}
 
-	err := grp.update(outcome.next)
+	outcomes, err := grp.update(w.state, outcome.next, false, nil)
 	if err != nil {
-		return nil, err
+		return allOutcomes, err
+	}
+	allOutcomes = append(allOutcomes, outcomes...)
+
+	outcomes, err = w.root.update(w.state, w.root.current, true, grp)
+	if err != nil {
+		return allOutcomes, nil
 	}
 
-	// reroutes
-	grp = w.root
-	scene := grp.scenes[grp.current]
+	return append(allOutcomes, outcomes...), nil
+}
 
-	for grp != nil {
+// Updates group while respecting any reroutes. Non-persistent sub-groups are reset to entry.
+// Reroutes reset persist behaviour as if the update to the group was caused by a choice.
+// Initial persist behaviour can be set by argument (true = just checking for reroutes).
+// An optional `stop` can be used to end updates early if encountering that sub-group.
+func (g *group) update(state *system.Collection, next Id, persist bool, stop *group) ([]string, error) {
+	var (
+		outcomes []string
+		visited  []Id
+	)
+
+	g.current = next
+	for {
+		scene, ok := g.scenes[g.current]
+		if !ok {
+			return nil, errCorruptWorldState
+		}
+
 		var active *Route
 		for _, rr := range scene.reroutes {
-			if safeEval(rr.Active, w.state) {
+			if safeEval(rr.Active, state) {
 				active = &rr
 				break
 			}
 		}
 
 		if active != nil {
-			grp.update(active.To)
-			if outcome := safeEval(active.Event, w.state); outcome != "" {
+			visited = append(visited, g.current)
+			persist = false // another move equivalent to making a choice
+
+			g.current = active.To
+			if outcome := safeEval(active.Event, state); outcome != "" {
 				outcomes = append(outcomes, outcome)
 			}
 
-			if active.To != grp.current { // stop infinite loop
+			if !slices.Contains(visited, g.current) { // stop infinite loop
 				continue // keep checking for reroutes before descent
 			}
 		}
 
-		grp = grp.groups[grp.current]
+		g = g.groups[g.current]
+		if g == nil || g == stop {
+			break
+		}
+
+		visited = nil
+		persist = persist || g.persist
+		if !persist {
+			g.current = g.entry
+		}
 	}
 
-	return outcomes, err
-}
-
-func (g *group) update(next Id) error {
-	if _, ok := g.scenes[next]; !ok {
-		return errCorruptWorldState
-	}
-
-	g.current = next
-	sub := g.groups[next]
-	for sub != nil && !sub.persist {
-		sub.current = sub.entry
-		sub = sub.groups[sub.entry]
-	}
-
-	return nil
+	return outcomes, nil
 }
 
 type outcome struct {

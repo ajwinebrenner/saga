@@ -52,7 +52,7 @@ func Build(root *Group, systems []any) (*World, error) {
 	for pending := range builder.pendingGroups() {
 		group, err := builder.convertGroup(pending.group)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("building sub-scenes for %q: %w", pending.from, err)
 		}
 
 		pending.parent.groups[pending.from] = group
