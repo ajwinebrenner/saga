@@ -123,22 +123,8 @@ func (b *builder) convertGroup(g *Group) (*group, error) {
 		return nil, ErrEmptyGroup
 	}
 
+	var err error
 	existing := make(map[Id]struct{})
-	for _, s := range g.Scenes {
-		if s.Id == "" {
-			return nil, ErrEmptyId
-		}
-
-		if _, exists := existing[s.Id]; exists {
-			b.dupeSceneIds[s.Id] = struct{}{}
-		}
-
-		existing[s.Id] = struct{}{}
-	}
-	if len(b.dupeSceneIds) > 0 {
-		return nil, DuplicateIdError{ids: b.dupeSceneIds}
-	}
-
 	converted := &group{
 		current: g.EntryScene,
 		entry:   g.EntryScene,
@@ -147,12 +133,20 @@ func (b *builder) convertGroup(g *Group) (*group, error) {
 		groups:  make(map[Id]*group),
 	}
 
-	if _, exists := existing[g.EntryScene]; !exists {
-		b.unknownSceneIds[g.EntryScene] = struct{}{}
-	}
+	b.unknownSceneIds[g.EntryScene] = struct{}{}
 
-	var err error
 	for _, s := range g.Scenes {
+		if s.Id == "" {
+			return nil, ErrEmptyId
+		}
+
+		delete(b.unknownSceneIds, s.Id)
+		if _, exists := existing[s.Id]; exists {
+			b.dupeSceneIds[s.Id] = struct{}{}
+		} else {
+			existing[s.Id] = struct{}{}
+		}
+
 		converted.scenes[s.Id], err = b.convertScene(existing, s)
 		if err != nil {
 			// TODO: can we report the full scene trail
@@ -170,6 +164,9 @@ func (b *builder) convertGroup(g *Group) (*group, error) {
 
 	if len(b.unknownSceneIds) > 0 {
 		return nil, UnknownIdError{ids: b.unknownSceneIds}
+	}
+	if len(b.dupeSceneIds) > 0 {
+		return nil, DuplicateIdError{ids: b.dupeSceneIds}
 	}
 	return converted, nil
 }
