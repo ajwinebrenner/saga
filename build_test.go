@@ -3,6 +3,7 @@ package saga
 import (
 	"fmt"
 	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/ajwinebrenner/saga/internal/system"
@@ -81,11 +82,8 @@ func testGroup() Group {
 						To:    "a",
 						Event: Just("rerouting!"),
 						Active: Dyn(func(sys *testSystem) bool {
-							if sys.reroute {
-								sys.reroute = false
-								return true
-							}
-							return false
+							defer func() { sys.reroute = false }()
+							return sys.reroute
 						}),
 					},
 					{
@@ -380,5 +378,71 @@ func TestBuildPassing(t *testing.T) {
 	if diff != "" {
 		t.Logf("worlds are not equivalent\n%s", diff)
 		t.Fail()
+	}
+}
+
+func BenchmarkBuild(b *testing.B) {
+	const largeCount = 1_000_000
+
+	type stubSys struct {
+		b bool
+	}
+
+	scenes := make([]Scene, 0, largeCount)
+	for i := range largeCount {
+		scenes = append(scenes, Scene{
+			Id:   Id(strconv.Itoa(i)),
+			Desc: Just(fmt.Sprintf("desc %d", i)),
+			Choices: []Choice{
+				{
+					Name: "next",
+					Desc: Just("go to next"),
+					Route: Route{
+						To: Id(strconv.Itoa(i + 1)),
+						Event: Dyn(func(s *stubSys) string {
+							return "going to next"
+						}),
+					},
+					Overrides: []Route{
+						{
+							To: Id(strconv.Itoa(i)),
+							Event: Dyn(func(s *stubSys) string {
+								return "stuck"
+							}),
+							Active: Dyn(func(s *stubSys) bool {
+								return s.b
+							}),
+						},
+					},
+				},
+			},
+			Reroutes: []Route{
+				{
+					To: Id(strconv.Itoa(i)),
+					Event: Dyn(func(s *stubSys) string {
+						return "deja vu"
+					}),
+					Active: Dyn(func(s *stubSys) bool {
+						return s.b
+					}),
+				},
+			},
+		})
+	}
+
+	scenes = append(scenes, Scene{
+		Id: Id(strconv.Itoa(largeCount)),
+	})
+
+	g := Group{
+		EntryScene: "1",
+		Scenes:     scenes,
+	}
+
+	for b.Loop() {
+		_, err := Build(&g, []any{&stubSys{}})
+		if err != nil {
+			b.Error(err)
+		}
 	}
 }
